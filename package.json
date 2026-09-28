@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0",
+    "effect": "^4.0.0-rc.118",
     "typescript": "^5.9"
   }
 }
