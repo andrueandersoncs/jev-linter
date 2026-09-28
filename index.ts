@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { Effect } from "effect";
 import { loadConfig } from "./src/config.ts";
 import { lint } from "./src/lint.ts";
 
@@ -14,7 +15,7 @@ async function main(args: string[]): Promise<number> {
     return 2;
   }
   try {
-    const { checked, diagnostics } = await lint(await loadConfig(args[1] ?? "jev-linter.json"));
+    const { checked, diagnostics } = await Effect.runPromise(lint(await loadConfig(args[1] ?? "jev-linter.json")));
     for (const item of diagnostics) {
       console.log(`${item.file}:${item.line}: error ${item.rule} (p=${item.probability.toFixed(2)}, threshold=${item.threshold.toFixed(2)})`);
     }

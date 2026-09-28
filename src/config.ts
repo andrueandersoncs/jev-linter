@@ -40,12 +40,7 @@ const FileConfig = Config.schema(Schema.fromJsonString(ConfigSchema), "CONFIG");
 
 export async function loadConfig(configPath: string): Promise<Config> {
   const absolute = resolve(configPath);
-  let text: string;
-  try {
-    text = await Bun.file(absolute).text();
-  } catch (error) {
-    throw new Error(`Cannot read JSON config ${configPath}: ${String(error)}`);
-  }
+  const text = await Bun.file(absolute).text();
   const config = await Effect.runPromise(FileConfig.parse(ConfigProvider.fromUnknown({ CONFIG: text })));
   return { ...config, root: dirname(absolute) };
 }
