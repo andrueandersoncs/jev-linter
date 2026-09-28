@@ -1,12 +1,21 @@
 {
   "name": "jev-linter",
   "module": "index.ts",
+  "bin": {
+    "jev-linter": "./index.ts"
+  },
+  "scripts": {
+    "lint": "bun run index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
   "type": "module",
   "private": true,
   "devDependencies": {
     "@types/bun": "latest"
   },
-  "peerDependencies": {
-    "typescript": "^7"
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "typescript": "^5.9"
   }
 }
