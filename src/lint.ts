@@ -2,11 +2,9 @@ import { join } from "node:path";
 import { noul, TypeSafeClient } from "@typesafe-ai/sdk";
 import { Data, Effect } from "effect";
 import { type Config } from "./config.ts";
-import { extractFragments, type Fragment } from "./extract.ts";
 
 export interface Diagnostic {
   file: string;
-  line: number;
   rule: string;
   probability: number;
   threshold: number;
@@ -14,7 +12,8 @@ export interface Diagnostic {
 
 class FileScanError extends Data.TaggedError("FileScanError")<{ readonly message: string; readonly cause: unknown }> {}
 class NoFilesMatchedError extends Data.TaggedError("NoFilesMatchedError")<{ readonly message: string }> {}
-class UnsupportedFileTypeError extends Data.TaggedError("UnsupportedFileTypeError")<{ readonly message: string }> {}
+class NoRulesMatchedError extends Data.TaggedError("NoRulesMatchedError")<{ readonly message: string }> {}
+class InvalidRuleError extends Data.TaggedError("InvalidRuleError")<{ readonly message: string }> {}
 class FileReadError extends Data.TaggedError("FileReadError")<{ readonly message: string; readonly cause: unknown }> {}
 class TypeSafeRequestError extends Data.TaggedError("TypeSafeRequestError")<{
   readonly message: string;
@@ -25,40 +24,52 @@ class InvalidTypeSafeAnswerError extends Data.TaggedError("InvalidTypeSafeAnswer
 export const lint = Effect.fn(function* (config: Config) {
   const paths = yield* Effect.try({
     try: () => {
-      const matched = new Set<string>();
-      for (const pattern of config.files) {
-        const glob = new Bun.Glob(pattern);
-        for (const path of glob.scanSync({ cwd: config.root, onlyFiles: true, followSymlinks: false }))
-          matched.add(path);
-      }
+      const scan = (patterns: ReadonlyArray<string>) => {
+        const matched = new Set<string>();
+        for (const pattern of patterns) {
+          for (const path of new Bun.Glob(pattern).scanSync({ cwd: config.root, onlyFiles: true, followSymlinks: false }))
+            matched.add(path);
+        }
+        return matched;
+      };
+      const files = scan(config.files);
       for (const pattern of config.exclude) {
         const glob = new Bun.Glob(pattern);
-        for (const path of matched) if (glob.match(path)) matched.delete(path);
+        for (const path of files) if (glob.match(path)) files.delete(path);
       }
-      return matched;
+      return { files, rules: scan(config.rules) };
     },
     catch: (cause) => new FileScanError({ message: `Cannot scan files in ${config.root}: ${String(cause)}`, cause }),
   });
-  if (paths.size === 0) {
-    return yield* Effect.fail(
-      new NoFilesMatchedError({ message: `No files matched the configured patterns in ${config.root}` }),
-    );
+  if (!paths.files.size) {
+    return yield* new NoFilesMatchedError({ message: `No files matched the configured patterns in ${config.root}` });
+  }
+  if (!paths.rules.size) {
+    return yield* new NoRulesMatchedError({ message: `No Markdown rules matched the configured patterns in ${config.root}` });
   }
 
-  const work: { file: string; fragment: Fragment }[] = [];
-  for (const file of [...paths].sort()) {
-    if (!/\.(?:ts|tsx|mts|cts)$/i.test(file)) {
-      return yield* Effect.fail(
-        new UnsupportedFileTypeError({
-          message: `Unsupported file type: ${file} (only TypeScript files are supported)`,
-        }),
-      );
+  const rules: { file: string; text: string }[] = [];
+  for (const file of [...paths.rules].sort()) {
+    if (!/\.md$/i.test(file)) {
+      return yield* new InvalidRuleError({ message: `Rule must be a Markdown file: ${file}` });
     }
     const text = yield* Effect.tryPromise({
       try: () => Bun.file(join(config.root, file)).text(),
+      catch: (cause) => new FileReadError({ message: `Cannot read rule ${file}: ${String(cause)}`, cause }),
+    });
+    if (!text.trim()) {
+      return yield* new InvalidRuleError({ message: `Rule is empty: ${file}` });
+    }
+    rules.push({ file, text: text.trim() });
+  }
+
+  const work: { file: string; code: string }[] = [];
+  for (const file of [...paths.files].sort()) {
+    const code = yield* Effect.tryPromise({
+      try: () => Bun.file(join(config.root, file)).text(),
       catch: (cause) => new FileReadError({ message: `Cannot read ${file}: ${String(cause)}`, cause }),
     });
-    for (const fragment of extractFragments(file, text)) work.push({ file, fragment });
+    work.push({ file, code });
   }
 
   const client = yield* Effect.try({
@@ -66,39 +77,41 @@ export const lint = Effect.fn(function* (config: Config) {
     catch: (cause) =>
       new TypeSafeRequestError({ message: `Cannot initialize TypeSafe client: ${String(cause)}`, cause }),
   });
-  if (!work.length) return { checked: 0, diagnostics: [] };
   const questions = Object.fromEntries(
-    config.rules.map((rule) => [
-      rule.id,
-      noul(rule.question, {
-        true: "The supplied text violates this rule.",
-        false: "The supplied text does not violate this rule.",
-      }),
+    rules.map((rule, index) => [
+      `rule_${index}`,
+      noul(
+        { rule: rule.text, question: "Does the source code in `code` violate `rule`? Consider the entire file, not only its prose." },
+        {
+          true: "The source code violates the rule.",
+          false: "The source code does not violate the rule.",
+        },
+      ),
     ]),
   );
   const diagnostics: Diagnostic[] = [];
   yield* Effect.forEach(
     work,
-    ({ file, fragment }) =>
+    ({ file, code }) =>
       Effect.gen(function* () {
         const response = yield* Effect.tryPromise({
           try: (signal) =>
             client.systemOne(
               {
                 model: config.model,
-                state: { path: file, text: fragment.text },
+                state: { path: file, code },
                 questions,
               },
               { signal },
             ),
           catch: (cause) =>
             new TypeSafeRequestError({
-              message: `TypeSafe request failed for ${file}:${fragment.line}: ${String(cause)}`,
+              message: `TypeSafe request failed for ${file}: ${String(cause)}`,
               cause,
             }),
         });
-        for (const rule of config.rules) {
-          const answer = response.answers[rule.id];
+        for (const [index, rule] of rules.entries()) {
+          const answer = response.answers[`rule_${index}`];
           if (
             !answer ||
             answer.type !== "noul" ||
@@ -106,25 +119,22 @@ export const lint = Effect.fn(function* (config: Config) {
             answer.noul < 0 ||
             answer.noul > 1
           ) {
-            return yield* Effect.fail(
-              new InvalidTypeSafeAnswerError({
-                message: `Invalid TypeSafe answer for ${rule.id} in ${file}:${fragment.line}`,
-              }),
-            );
+            return yield* new InvalidTypeSafeAnswerError({
+              message: `Invalid TypeSafe answer for ${rule.file} in ${file}`,
+            });
           }
-          if (answer.noul >= rule.threshold) {
+          if (answer.noul >= config.threshold) {
             diagnostics.push({
               file,
-              line: fragment.line,
-              rule: rule.id,
+              rule: rule.file,
               probability: answer.noul,
-              threshold: rule.threshold,
+              threshold: config.threshold,
             });
           }
         }
       }),
     { concurrency: 4, discard: true },
   );
-  diagnostics.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule));
+  diagnostics.sort((a, b) => a.file.localeCompare(b.file) || a.rule.localeCompare(b.rule));
   return { checked: work.length, diagnostics };
 });

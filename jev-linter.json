@@ -1,11 +1,6 @@
 {
   "files": ["index.ts", "src/**/*.ts"],
   "exclude": ["**/*.test.ts"],
-  "rules": [
-    {
-      "id": "respectful-language",
-      "question": "Does `text` use insulting or demeaning language directed at people or groups?",
-      "threshold": 0.9
-    }
-  ]
+  "rules": ["rules/*.md"],
+  "threshold": 0.5
 }
